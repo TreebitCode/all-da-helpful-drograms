@@ -1,9 +1,69 @@
 import os
-import msvcrt
 from time import sleep
 from datetime import datetime
 
+if os.name == 'nt':
+    import msvcrt
+else:
+    import sys
+    import termios
+    import atexit
+    from select import select
+    unix_stdin_fd = 0
+    unix_old_term = None
+
 ### BASICS ###
+
+def getch():
+    if os.name == 'nt':
+        return msvcrt.getch().decode('utf-8')
+    else:
+        return sys.stdin.read(1)
+
+def kbhit():
+    if os.name == 'nt':
+        return msvcrt.kbhit()
+    else:
+        dr, dw, de = select([sys.stdin], [], [], 0)
+        return dr != []
+
+def setup():
+    switch_buffer()
+    cursor(0)
+    # support normal-terminal reset at exit
+    atexit.register(cleanup)
+    if os.name == 'nt':
+        os.system('') # enable ansi
+    else:
+        # save the terminal settings
+        global unix_stdin_fd
+        global unix_old_term
+        unix_stdin_fd = sys.stdin.fileno()
+        unix_new_term = termios.tcgetattr(unix_stdin_fd)
+        unix_old_term = termios.tcgetattr(unix_stdin_fd)
+        # new terminal setting unbuffered
+        unix_new_term[3] = (unix_new_term[3] & ~termios.ICANON & ~termios.ECHO)
+        termios.tcsetattr(unix_stdin_fd, termios.TCSAFLUSH, unix_new_term)
+
+cleaned_up = False
+
+def cleanup(quitting=False):
+    global cleaned_up
+    if cleaned_up: return
+    cleaned_up = True
+    cursor()
+    if not quitting:
+        try:
+            input('press enter to quit...')
+        except KeyboardInterrupt:
+            pass
+    switch_buffer(0)
+    if os.name != 'nt' and unix_stdin_fd:
+        termios.tcsetattr(unix_stdin_fd, termios.TCSAFLUSH, unix_old_term)
+
+def quit():
+    cleanup(True)
+    exit()
 
 # no newline output
 def text(*args, **kwargs):
@@ -14,22 +74,19 @@ def flush(): print(end='', flush=True)
 
 # keyboard input
 def read_key():
-	special_keys = {
-		'\b': 'backspace',
-		'\t': 'tab',
-		'\r': 'enter',
-		'\x1b': 'esc'
-	}
+    special_keys = {
+        '\b': 'backspace',
+        '\t': 'tab',
+        '\n': 'enter',
+        '\r': 'enter',
+        '\x1b': 'esc'
+    }
 
-	flush()
-
-	key = msvcrt.getwch()
-	if ord(key) < 32:
-		key = special_keys[key]
-	return key
-
-# enable ANSI sequences
-def enable_ansi(): os.system('')
+    flush()
+    key = getch()
+    if key in special_keys:
+        key = special_keys[key]
+    return key
 
 # generate ANSI sequence
 def esc(params): return f'\x1b[{params}'
@@ -38,6 +95,8 @@ def esc(params): return f'\x1b[{params}'
 def seq(params): print(f'\x1b[{params}', end='')
 
 ### ANSI SEQUENCES ###
+
+def clear(): text('\x1bc')
 
 def switch_buffer(on=True): seq('?1049'+'lh'[on])
 
@@ -59,10 +118,12 @@ def cpos():
 	seq('6n')
 	coords = ''
 	flush()
-	char = msvcrt.getwch()
+	char = getch()
+	while char != '\x1b':
+		char = getch()
 	while char != 'R':
 		coords += char
-		char = msvcrt.getwch()
+		char = getch()
 	return [int(c) for c in coords[2:].split(';')][::-1]
 
 # save cursor position
@@ -120,40 +181,38 @@ def remove(edit):
 
 # initialize interface before interpreting
 def initialize(settings):
+    clear()
+    cursor(0)
 
-	switch_buffer()
-	cursor(0)
+    # black title with colored background
+    def display_title(title, bg):
+    	cmove(0, -1)
+    	text(f'{color(bg, 1)}\x1b[30m {title} \x1b[0m')
 
-	# black title with colored background
-	def display_title(title, bg):
-		cmove(0, -1)
-		text(f'{color(bg, 1)}\x1b[30m {title} \x1b[0m')
-
-	# memory display
-	cjump(*settings['mem display pos'])
-	text(' ')
-	display_title('memory', '#ffd541')
-	cjump(*settings['mem display pos'])
-	text(color('#849be4'))
-	text('╭\x1b[1B\b│\x1b[1B\b╰')
-	for i in range(settings['mem size']):
-		text('\x1b[2A──┬\x1b[1B\b\b\b00│\x1b[1B\b\b\b──┴')
-	text('\x1b[2A\b╮\x1b[2B\b╯')
+    # memory display
+    cjump(*settings['mem display pos'])
+    text(' ')
+    display_title('memory', '#ffd541')
+    cjump(*settings['mem display pos'])
+    text(color('#849be4'))
+    text('╭\x1b[1B\b│\x1b[1B\b╰')
+    for i in range(settings['mem size']):
+	    text('\x1b[2A──┬\x1b[1B\b\b\b00│\x1b[1B\b\b\b──┴')
+    text('\x1b[2A\b╮\x1b[2B\b╯')
 
 	# code window
-	cjump(*settings['code window pos'])
-	display_title('code', '#e86a9b')
-	cjump(*settings['code window pos'])
-	text('\x1b[1B\x1b[3G'.join(code))
+    cjump(*settings['code window pos'])
+    display_title('code', '#e86a9b')
+    cjump(*settings['code window pos'])
+    text('\x1b[1B\x1b[3G'.join(code))
 
-	# terminal
-	cjump(*settings['terminal pos'])
-	display_title('terminal', '#59c135')
+    # terminal
+    cjump(*settings['terminal pos'])
+    display_title('terminal', '#59c135')
 
 # interpret brainfuck code
 def interpret(code, settings):
-
-	# memory 
+	# memory
 	mem_size = settings['mem size']
 	mem = [0] * mem_size
 
@@ -266,7 +325,7 @@ def interpret(code, settings):
 			crestore()
 			cursor(1)
 			input_start = datetime.now()
-			mem[mp] = ord(msvcrt.getwch())
+			mem[mp] = ord(getch())
 			input_end = datetime.now()
 			input_time+=(input_end-input_start).total_seconds()
 			cursor(0)
@@ -292,7 +351,7 @@ def interpret(code, settings):
 			nls.append(cp)
 			instructions -= 1
 		else: instructions -= 1
-		
+
 		# erase code pointer
 		text(code_pointer_erase)
 
@@ -339,10 +398,8 @@ def apply_sequence(seq, styles):
 
 	return styles
 
-enable_ansi()
-
 settings = {
-	'mem size': 64,
+	'mem size': 48,
 	'mem display pos': [2, 2],
 	'code window pos': [3, 7],
 	'terminal pos': [104, 7],
@@ -353,6 +410,8 @@ with open('square.bf', 'r') as code_file:
 	code = code_file.read()
 	code = code.replace('\t', ' '*4)
 	code = code.split('\n')
+
+setup()
 
 initialize(settings)
 
@@ -365,20 +424,19 @@ csave()
 
 running = True
 while running:
+    key = read_key()
+    if key == '`':
+        initialize(settings)
+        interpret('\n'.join(code), settings)
+        jump_to_edit()
+        cursor()
+        csave()
+    elif key == 'esc':
+        sleep(1.0)
+        if not kbhit():
+            running = False
+    else: # send to editor
+        process_key(key)
+        csave()
 
-	key = read_key()
-	
-	if key == '`':
-		initialize(settings)
-		interpret('\n'.join(code), settings)
-		jump_to_edit()
-		cursor()
-		csave()
-	elif key == 'esc':
-		running = False
-	else: # send to editor
-		process_key(key)
-		csave()
-
-switch_buffer(0)
-cursor()
+quit()
