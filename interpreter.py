@@ -28,8 +28,6 @@ def kbhit():
         return dr != []
 
 def setup():
-    switch_buffer()
-    cursor(0)
     # support normal-terminal reset at exit
     atexit.register(cleanup)
     if os.name == 'nt':
@@ -44,6 +42,9 @@ def setup():
         # new terminal setting unbuffered
         unix_new_term[3] = (unix_new_term[3] & ~termios.ICANON & ~termios.ECHO)
         termios.tcsetattr(unix_stdin_fd, termios.TCSAFLUSH, unix_new_term)
+    # setup ansi after enabling
+    switch_buffer()
+    cursor(0)
 
 cleaned_up = False
 
@@ -53,12 +54,10 @@ def cleanup(quitting=False):
     cleaned_up = True
     cursor()
     if not quitting:
-        try:
-            input('press enter to quit...')
-        except KeyboardInterrupt:
-            pass
+        try: input('press enter to quit...')
+        except KeyboardInterrupt: pass
     switch_buffer(0)
-    if os.name != 'nt' and unix_stdin_fd:
+    if os.name != 'nt' and unix_old_term is not None:
         termios.tcsetattr(unix_stdin_fd, termios.TCSAFLUSH, unix_old_term)
 
 def quit():
@@ -96,7 +95,7 @@ def seq(params): print(f'\x1b[{params}', end='')
 
 ### ANSI SEQUENCES ###
 
-def clear(): text('\x1bc')
+def clear(): switch_buffer()
 
 def switch_buffer(on=True): seq('?1049'+'lh'[on])
 
@@ -127,10 +126,10 @@ def cpos():
 	return [int(c) for c in coords[2:].split(';')][::-1]
 
 # save cursor position
-def csave(): text('\x1b[s')
+def csave(): seq('s')
 
 # restore cursor position
-def crestore(): text('\x1b[u')
+def crestore(): seq('u')
 
 # show/hide cursor
 def cursor(show=True): seq('?25'+'lh'[show])
@@ -425,6 +424,7 @@ csave()
 running = True
 while running:
     key = read_key()
+    print(key)
     if key == '`':
         initialize(settings)
         interpret('\n'.join(code), settings)
@@ -432,9 +432,7 @@ while running:
         cursor()
         csave()
     elif key == 'esc':
-        sleep(1.0)
-        if not kbhit():
-            running = False
+        running = False
     else: # send to editor
         process_key(key)
         csave()
