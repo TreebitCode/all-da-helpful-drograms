@@ -8,9 +8,11 @@ else:
     import sys
     import termios
     import atexit
-    from select import select
+    import struct
+    from fcntl import ioctl
     unix_stdin_fd = 0
     unix_old_term = None
+    unix_stdin_buf = []
 
 ### BASICS ###
 
@@ -18,14 +20,20 @@ def getch():
     if os.name == 'nt':
         return msvcrt.getch().decode('utf-8')
     else:
-        return sys.stdin.read(1)
+        while not kbhit():
+            pass
+        return unix_stdin_buf.pop(0)
 
 def kbhit():
     if os.name == 'nt':
         return msvcrt.kbhit()
     else:
-        dr, dw, de = select([sys.stdin], [], [], 0)
-        return dr != []
+        global unix_stdin_buf
+        buf = bytearray(4)
+        r = ioctl(unix_stdin_fd, termios.FIONREAD, buf)
+        size, = struct.unpack('<I', buf)
+        unix_stdin_buf += list(sys.stdin.read(size))
+        return len(unix_stdin_buf) > 0
 
 def setup():
     # support normal-terminal reset at exit
@@ -424,7 +432,7 @@ csave()
 running = True
 while running:
     key = read_key()
-    print(key)
+
     if key == '`':
         initialize(settings)
         interpret('\n'.join(code), settings)
@@ -432,7 +440,9 @@ while running:
         cursor()
         csave()
     elif key == 'esc':
-        running = False
+        sleep(0.01)
+        if not kbhit():
+            running = False
     else: # send to editor
         process_key(key)
         csave()
