@@ -1,13 +1,14 @@
 import os
+import glob
+import atexit
 from time import sleep
 from datetime import datetime
 
-if os.name == 'nt':
-    import msvcrt
+# cross platform support
+if os.name == 'nt': import msvcrt
 else:
     import sys
     import termios
-    import atexit
     import struct
     from fcntl import ioctl
     unix_stdin_fd = 0
@@ -16,17 +17,16 @@ else:
 
 ### BASICS ###
 
+# get character from input queue
 def getch():
-    if os.name == 'nt':
-        return msvcrt.getch().decode('utf-8')
+    if os.name == 'nt': return msvcrt.getwch()
     else:
-        while not kbhit():
-            pass
+        while not kbhit(): pass
         return unix_stdin_buf.pop(0)
 
+# check if input queue is empty
 def kbhit():
-    if os.name == 'nt':
-        return msvcrt.kbhit()
+    if os.name == 'nt': return msvcrt.kbhit()
     else:
         global unix_stdin_buf
         buf = bytearray(4)
@@ -35,11 +35,11 @@ def kbhit():
         unix_stdin_buf += list(sys.stdin.read(size))
         return len(unix_stdin_buf) > 0
 
+# enable ansi sequences
 def setup():
-    # support normal-terminal reset at exit
+    # support terminal reset at exit
     atexit.register(cleanup)
-    if os.name == 'nt':
-        os.system('') # enable ansi
+    if os.name == 'nt': os.system('')
     else:
         # save the terminal settings
         global unix_stdin_fd
@@ -50,31 +50,26 @@ def setup():
         # new terminal setting unbuffered
         unix_new_term[3] = (unix_new_term[3] & ~termios.ICANON & ~termios.ECHO)
         termios.tcsetattr(unix_stdin_fd, termios.TCSAFLUSH, unix_new_term)
-    # setup ansi after enabling
     switch_buffer()
     cursor(0)
-
-cleaned_up = False
+    flush()
 
 def cleanup(quitting=False):
-    global cleaned_up
-    if cleaned_up: return
-    cleaned_up = True
-    cursor()
     if not quitting:
         try: input('press enter to quit...')
         except KeyboardInterrupt: pass
+    cursor()
     switch_buffer(0)
     if os.name != 'nt' and unix_old_term is not None:
         termios.tcsetattr(unix_stdin_fd, termios.TCSAFLUSH, unix_old_term)
 
 def quit():
+    atexit.unregister(cleanup)
     cleanup(True)
     exit()
 
 # no newline output
-def text(*args, **kwargs):
-    print(*args, **kwargs, end='')
+def text(*args, **kwargs): print(*args, **kwargs, end='')
 
 # flush
 def flush(): print(end='', flush=True)
@@ -88,11 +83,17 @@ def read_key():
         '\r': 'enter',
         '\x1b': 'esc'
     }
+    double_keys = {
+        'H': 'up',
+        'K': 'left',
+        'M': 'right',
+        'P': 'down'
+    }
 
     flush()
     key = getch()
-    if key in special_keys:
-        key = special_keys[key]
+    if key in special_keys: key = special_keys[key]
+    if key == 'à': key = double_keys[getch()]
     return key
 
 # generate ANSI sequence
@@ -102,9 +103,6 @@ def esc(params): return f'\x1b[{params}'
 def seq(params): print(f'\x1b[{params}', end='')
 
 ### ANSI SEQUENCES ###
-
-def clear(): switch_buffer()
-
 def switch_buffer(on=True): seq('?1049'+'lh'[on])
 
 # set cursor position
@@ -123,14 +121,17 @@ def cmove(x=0, y=0):
 # get cursor position
 def cpos():
     seq('6n')
-    coords = ''
     flush()
+    
+    # remove junk
     char = getch()
-    while char != '\x1b':
-        char = getch()
+    while char != '\x1b': char = getch()
+    
+    coords = ''
     while char != 'R':
         coords += char
         char = getch()
+    
     return [int(c) for c in coords[2:].split(';')][::-1]
 
 # save cursor position
@@ -184,17 +185,19 @@ def remove(edit):
     line = line[:edit[0]] + line[edit[0]+1:]
     code[edit[1]] = line
 
+### USER INTERFACE ###
+
+# black title with colored background
+def display_title(title, bg):
+    cmove(0, -1)
+    text(f'{color(bg, 1)}\x1b[30m {title} \x1b[0m')
+
 ### INTERPRETER ###
 
 # initialize interface before interpreting
 def initialize(settings):
-    clear()
+    switch_buffer()
     cursor(0)
-
-    # black title with colored background
-    def display_title(title, bg):
-        cmove(0, -1)
-        text(f'{color(bg, 1)}\x1b[30m {title} \x1b[0m')
 
     # memory display
     cjump(*settings['mem display pos'])
@@ -272,6 +275,7 @@ def interpret(code, settings):
     line_ending = False
 
     # ANSI sequence handling
+    prev = ''
     sequence = ''
     styles = ['', '', '']  # styles applied to output text
 
@@ -307,9 +311,12 @@ def interpret(code, settings):
         elif cmd == '.':
             crestore()
             char = chr(mem[mp])
+            if prev == '\x1b':
+                if char in '[ ]': sequence = f'\x1b'
+                else: text('\x1b')
             if sequence:
                 sequence += char
-                if ord(char) > 64 and char != '[':
+                if ord(char) > 64 and char not in '[]':
                     styles = apply_sequence(sequence, styles)
                     sequence = ''
             else:
@@ -321,11 +328,12 @@ def interpret(code, settings):
                         line_ending = True
                     else:
                         line_ending = False
-                elif char == '\x1b': sequence = '\x1b'
+                elif char == '\x1b': pass
                 else:
                     text(char)
                     line_ending = False
                 if styles: text('\x1b[0m')
+            prev = char
             csave()
         elif cmd == ',':
             flush()
@@ -392,12 +400,40 @@ def apply_sequence(seq, styles):
         # prevent from going out of bounds
         if cpos()[0] - dist < tpos[0]: text(f'\x1b[{tpos[0]}G')
         else: text(seq)
+    elif term == 'E':
+        dist = int(seq[2:-1])
+        text(f'\x1b[{dist}B\x1b[{tpos[0]}G')
+    elif term == 'F':
+        dist = int(seq[2:-1])
+        # prevent from going out of bounds
+        if cpos()[1] - dist < tpos[1]: text(f'\x1b[{tpos[1]};{tpos[0]}H')
+        else: text(f'\x1b[{dist}A\x1b[{tpos[0]}G')
+    elif term == 'G': text(f'\x1b[{tpos[0]+int(seq[2:-1])-1}G')
+    elif term in 'Hf':
+        hx, hy = tpos
+        if seq == '\x1b[H': text(f'\x1b[{hy};{hx}H')
+        else:
+            y, x = [int(coord) for coord in seq[2:-1].split(';')]
+            x, y = [x, 1][x<1], [y, 1][y<1]
+            text(f'\x1b[{hy+y-1};{hx+x-1}H')
+    elif term == 'd': text(f'\x1b[{tpos[1]+int(seq[2:-1])-1}d')
 
     # style and color control
     elif term == 'm':
+
         style = int(seq[2:-1])
+        
+        # 16-color
+        color_fg_16 = list(range(30,38))+[39]+list(range(90,98))
+        color_bg_16 = list(range(40,48))+[49]+list(range(100,108))
+
+        # reset
         if style == 0: styles = [''] * 3
-        elif style in range(40, 48) or style in range(100, 108):
+        # 16-color foreground
+        elif style in color_fg_16:
+            styles[0] = seq
+        # 16-color background
+        elif style in color_bg_16:
             styles[1] = seq
 
     else:
@@ -406,19 +442,48 @@ def apply_sequence(seq, styles):
     return styles
 
 settings = {
-    'mem size': 48,
+    'mem size': 64,
     'mem display pos': [2, 2],
     'code window pos': [3, 7],
     'terminal pos': [104, 7],
 }
 
+setup()
+
+cjump(3, 3)
+display_title('programs', '#249fde')
+
+file_list = glob.glob('*.bf')
+
+cjump(4, 4)
+text('\n\x1b[4G'.join(file_list))
+
+prev_pick = 0
+pick = 0
+
+cjump(3, 4)
+text(esc('30m')+color('#a6fcdb', 1))
+text(f' {file_list[0]} \x1b[0m')
+
+picking = True
+while picking:
+    if pick != prev_pick:
+        cjump(3, 4+prev_pick)
+        text(f' {file_list[prev_pick]} ')
+        cjump(3, 4+pick)
+        text(esc('30m')+color('#a6fcdb', 1))
+        text(f' {file_list[pick]} \x1b[0m')
+        prev_pick = pick
+    key = read_key()
+    if key == 'down': pick=[pick+1,0][pick==len(file_list)-1]
+    elif key == 'up': pick=[pick-1,len(file_list)-1][pick==0]
+    elif key == 'enter': picking = False
+
 # import code from file
-with open('square.bf', 'r') as code_file:
+with open(file_list[pick], 'r') as code_file:
     code = code_file.read()
     code = code.replace('\t', ' '*4)
     code = code.split('\n')
-
-setup()
 
 initialize(settings)
 
@@ -441,8 +506,7 @@ while running:
         csave()
     elif key == 'esc':
         sleep(0.01)
-        if not kbhit():
-            running = False
+        if not kbhit(): running = False
     else: # send to editor
         process_key(key)
         csave()
